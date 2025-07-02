@@ -196,6 +196,153 @@ class EnhancedAgentEngine {
 
 const agentEngine = new EnhancedAgentEngine();
 
+// Performance and Analytics Tracking
+class PerformanceMonitor {
+  constructor() {
+    this.metrics = {
+      requests: [],
+      responseTime: [],
+      memory: [],
+      agents: new Map(),
+      errors: []
+    };
+    this.startTime = Date.now();
+    this.startMonitoring();
+  }
+
+  startMonitoring() {
+    // Collect memory metrics every 30 seconds
+    setInterval(() => {
+      const memUsage = process.memoryUsage();
+      this.metrics.memory.push({
+        timestamp: Date.now(),
+        rss: memUsage.rss,
+        heapUsed: memUsage.heapUsed,
+        heapTotal: memUsage.heapTotal,
+        external: memUsage.external
+      });
+      
+      // Keep only last 100 entries
+      if (this.metrics.memory.length > 100) {
+        this.metrics.memory = this.metrics.memory.slice(-100);
+      }
+    }, 30000);
+  }
+
+  recordRequest(req, res, responseTime) {
+    this.metrics.requests.push({
+      timestamp: Date.now(),
+      method: req.method,
+      url: req.url,
+      statusCode: res.statusCode,
+      responseTime,
+      userAgent: req.get('User-Agent'),
+      ip: req.ip
+    });
+
+    this.metrics.responseTime.push({
+      timestamp: Date.now(),
+      value: responseTime
+    });
+
+    // Keep only last 1000 requests
+    if (this.metrics.requests.length > 1000) {
+      this.metrics.requests = this.metrics.requests.slice(-1000);
+    }
+
+    if (this.metrics.responseTime.length > 1000) {
+      this.metrics.responseTime = this.metrics.responseTime.slice(-1000);
+    }
+  }
+
+  recordError(error, req) {
+    this.metrics.errors.push({
+      timestamp: Date.now(),
+      message: error.message,
+      stack: error.stack,
+      url: req?.url,
+      method: req?.method
+    });
+
+    // Keep only last 100 errors
+    if (this.metrics.errors.length > 100) {
+      this.metrics.errors = this.metrics.errors.slice(-100);
+    }
+  }
+
+  getMetrics() {
+    const now = Date.now();
+    const uptime = now - this.startTime;
+    
+    return {
+      uptime,
+      startTime: this.startTime,
+      requests: {
+        total: this.metrics.requests.length,
+        recent: this.metrics.requests.slice(-100),
+        avgResponseTime: this.calculateAverage(this.metrics.responseTime.slice(-100).map(r => r.value)),
+        requestsPerMinute: this.calculateRequestsPerMinute()
+      },
+      memory: {
+        current: process.memoryUsage(),
+        history: this.metrics.memory.slice(-20)
+      },
+      agents: {
+        active: agentEngine.activeAgents.size,
+        totalCreated: Array.from(agentEngine.activeAgents.values()).length,
+        totalTasksCompleted: Array.from(agentEngine.activeAgents.values())
+          .reduce((sum, agent) => sum + agent.completedTasks, 0)
+      },
+      errors: {
+        total: this.metrics.errors.length,
+        recent: this.metrics.errors.slice(-10)
+      },
+      system: {
+        nodeVersion: process.version,
+        platform: process.platform,
+        arch: process.arch,
+        cpuUsage: process.cpuUsage()
+      }
+    };
+  }
+
+  calculateAverage(values) {
+    if (values.length === 0) return 0;
+    return values.reduce((sum, val) => sum + val, 0) / values.length;
+  }
+
+  calculateRequestsPerMinute() {
+    const oneMinuteAgo = Date.now() - 60000;
+    const recentRequests = this.metrics.requests.filter(req => req.timestamp > oneMinuteAgo);
+    return recentRequests.length;
+  }
+}
+
+const performanceMonitor = new PerformanceMonitor();
+
+// Middleware to track response time
+app.use((req, res, next) => {
+  const startTime = Date.now();
+  
+  res.on('finish', () => {
+    const responseTime = Date.now() - startTime;
+    performanceMonitor.recordRequest(req, res, responseTime);
+  });
+  
+  next();
+});
+
+// Enhanced error handling middleware
+app.use((error, req, res, next) => {
+  performanceMonitor.recordError(error, req);
+  console.error('Error:', error);
+  res.status(500).json({ 
+    success: false, 
+    error: 'Internal server error',
+    timestamp: new Date().toISOString()
+  });
+});
+
 // API Routes
 app.get('/api/agents', (req, res) => {
   const agents = Array.from(agentEngine.activeAgents.values());
@@ -292,6 +439,241 @@ io.on('connection', (socket) => {
 // Serve the main application
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Advanced Metrics and Monitoring APIs
+
+// Get comprehensive system metrics
+app.get('/api/metrics', (req, res) => {
+  try {
+    const metrics = performanceMonitor.getMetrics();
+    res.json(metrics);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get real-time performance data
+app.get('/api/metrics/performance', (req, res) => {
+  try {
+    const recentResponseTimes = performanceMonitor.metrics.responseTime.slice(-50);
+    const recentMemory = performanceMonitor.metrics.memory.slice(-10);
+    
+    res.json({
+      responseTime: {
+        current: recentResponseTimes[recentResponseTimes.length - 1]?.value || 0,
+        average: performanceMonitor.calculateAverage(recentResponseTimes.map(r => r.value)),
+        history: recentResponseTimes
+      },
+      memory: {
+        current: process.memoryUsage(),
+        history: recentMemory
+      },
+      requests: {
+        perMinute: performanceMonitor.calculateRequestsPerMinute(),
+        total: performanceMonitor.metrics.requests.length
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get agent analytics
+app.get('/api/metrics/agents', (req, res) => {
+  try {
+    const agents = Array.from(agentEngine.activeAgents.values());
+    const agentsByType = agents.reduce((acc, agent) => {
+      acc[agent.type] = (acc[agent.type] || 0) + 1;
+      return acc;
+    }, {});
+
+    const totalTasks = agents.reduce((sum, agent) => sum + agent.completedTasks, 0);
+    const activeAgents = agents.filter(agent => agent.status === 'working').length;
+
+    res.json({
+      total: agents.length,
+      active: activeAgents,
+      byType: agentsByType,
+      totalTasksCompleted: totalTasks,
+      averageTasksPerAgent: agents.length > 0 ? totalTasks / agents.length : 0,
+      agents: agents.map(agent => ({
+        id: agent.id,
+        type: agent.type,
+        status: agent.status,
+        completedTasks: agent.completedTasks,
+        createdAt: agent.createdAt,
+        capabilities: agent.capabilities.length
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Stress test endpoint for performance testing
+app.post('/api/stress-test', async (req, res) => {
+  try {
+    const { 
+      agentCount = 5, 
+      taskCount = 10, 
+      concurrency = 3 
+    } = req.body;
+
+    const startTime = Date.now();
+    const results = {
+      agentsCreated: 0,
+      tasksCompleted: 0,
+      errors: [],
+      duration: 0,
+      averageTaskTime: 0
+    };
+
+    // Create multiple agents concurrently
+    const agentPromises = [];
+    for (let i = 0; i < agentCount; i++) {
+      agentPromises.push(
+        agentEngine.createAgent('autonomous', { 
+          stressTest: true,
+          testId: `stress_${Date.now()}_${i}`
+        })
+      );
+    }
+
+    const agents = await Promise.all(agentPromises);
+    results.agentsCreated = agents.length;
+
+    // Execute tasks concurrently
+    const taskPromises = [];
+    for (let i = 0; i < taskCount; i++) {
+      const agent = agents[i % agents.length];
+      const task = {
+        type: 'stress_test',
+        description: `Stress test task ${i + 1}`,
+        complexity: 'low'
+      };
+
+      taskPromises.push(
+        agentEngine.executeTask(agent.id, task)
+          .then(() => {
+            results.tasksCompleted++;
+          })
+          .catch(error => {
+            results.errors.push(error.message);
+          })
+      );
+
+      // Limit concurrency
+      if (taskPromises.length >= concurrency) {
+        await Promise.all(taskPromises.splice(0, concurrency));
+      }
+    }
+
+    // Wait for remaining tasks
+    await Promise.all(taskPromises);
+
+    results.duration = Date.now() - startTime;
+    results.averageTaskTime = results.tasksCompleted > 0 ? 
+      results.duration / results.tasksCompleted : 0;
+
+    res.json({
+      success: true,
+      results,
+      performance: {
+        agentsPerSecond: (results.agentsCreated / results.duration) * 1000,
+        tasksPerSecond: (results.tasksCompleted / results.duration) * 1000,
+        successRate: (results.tasksCompleted / taskCount) * 100
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Code quality analysis endpoint
+app.post('/api/analyze-code', async (req, res) => {
+  try {
+    const { code, language = 'javascript' } = req.body;
+    
+    if (!code) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Code is required' 
+      });
+    }
+
+    // Simulate code analysis (in real implementation, use actual analysis tools)
+    const analysis = {
+      lines: code.split('\n').length,
+      complexity: Math.floor(Math.random() * 10) + 1,
+      maintainabilityIndex: Math.floor(Math.random() * 40) + 60,
+      testCoverage: Math.floor(Math.random() * 30) + 70,
+      issues: [],
+      suggestions: [
+        'Consider adding more descriptive variable names',
+        'Extract complex logic into separate functions',
+        'Add error handling for edge cases'
+      ],
+      metrics: {
+        functionsCount: (code.match(/function|=>/g) || []).length,
+        variablesCount: (code.match(/let|const|var/g) || []).length,
+        commentsCount: (code.match(/\/\/|\/\*|\*\//g) || []).length
+      }
+    };
+
+    // Add some random issues for demo
+    if (Math.random() > 0.7) {
+      analysis.issues.push({
+        type: 'warning',
+        line: Math.floor(Math.random() * analysis.lines) + 1,
+        message: 'Potential optimization opportunity',
+        severity: 'medium'
+      });
+    }
+
+    res.json({
+      success: true,
+      language,
+      analysis,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// WebSocket connection health check
+app.get('/api/websocket/health', (req, res) => {
+  const connectedClients = io.engine.clientsCount;
+  
+  res.json({
+    success: true,
+    websocket: {
+      connected: connectedClients,
+      healthy: connectedClients >= 0,
+      uptime: Date.now() - performanceMonitor.startTime
+    }
+  });
+});
+
+// System health endpoint
+app.get('/api/health', (req, res) => {
+  const memUsage = process.memoryUsage();
+  const uptime = process.uptime();
+  
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime,
+    memory: memUsage,
+    agents: {
+      active: agentEngine.activeAgents.size,
+      total: Array.from(agentEngine.activeAgents.values()).length
+    },
+    version: '1.0.0'
+  });
 });
 
 const PORT = process.env.PORT || 3000;
